@@ -1,0 +1,117 @@
+---
+title: "Recommender System Using Baseline Predictor"
+author: "Vikas Sinha"
+date: "June 10 2019"
+output:
+  html_document:
+    code_folding: show
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 6
+    toc_float: yes
+  pdf_document: default
+  word_document:
+    toc: yes
+    toc_depth: '6'
+---
+
+
+# Introduction
+
+The following is an implementation of a Recommender System that recommends movies. This system is meant to demonstrate the usage of baseline predictors that compute biases for each user and item. The data set used is from *grouplens.org*.
+
+
+```{r load, eval=T, echo=T, warning=F, message=F}
+library(caret)
+library(data.table)
+library(dplyr)
+library(earth)
+library(ggplot2)
+library(gridExtra)
+library(ipred)
+library(knitr)
+library(lubridate)
+library(mice)
+library(party)
+library(psych)
+library(rpart)
+library(tidyr)
+library(utils)
+library(recommenderlab)
+library(reshape2)
+library(rrecsys)
+```
+
+
+# Dataset
+
+GroupLens is a research lab at the University of Minnesota that specializes in recommendation systems. The data used are in the file *ml-latest-small.zip* downloaded from the URL (http://grouplens.org/datasets/movielens/latest).
+
+We next examine the summaries of the dataframes corresponding to the movies and their ratings.
+
+```{r Load, eval=T, echo=T, warning=F, message=F}
+moviefile = "ml-latest-small/movies.csv"
+ratingsfile = "ml-latest-small/ratings.csv"
+
+movies = read.csv(moviefile)
+ratings = read.csv(ratingsfile)
+
+head(movies)
+summary(movies)
+
+head(ratings)
+summary(ratings)
+```
+
+
+Since the ratings file contains one entry per rating, we can find the number of unique users as follows.
+
+```{r uniq1, eval=T, echo=T, warning=F, message=F}
+cat("The number of unique users in the data set is:", length(unique(ratings$userId)))
+```
+
+
+# User-Item Matrix
+
+A user-item matrix is created, with each row representing a user and each column representing a movie (item). The element for a given row and column represents the rating given by the user to the movie. The *dcast()* function is used to convert from long to wide format.
+
+```{r da1, eval=T, echo=T, warning=F, message=F}
+ratings2 = dplyr::select(ratings, -timestamp)
+ui = data.table::dcast(ratings2, userId ~ movieId, value.var = "rating")
+ui2 = as.matrix(dplyr::select(ui, -userId))
+```
+
+
+
+## Test/Train data sets
+
+Split the data set into test and train portions.
+
+```{r tt1, eval=T, echo=T, warning=F, message=F}
+```
+
+
+# Raw (mean) rating for each user and item combination. Calculate RMSE for the raw average.
+
+what is baseline predictor?
+raw average: every entry gets the same prediction, mean over the data set.
+
+```{r m1, eval=T, echo=T, warning=F, message=F}
+
+```
+
+
+# Calculate bias for each user and for each item.
+
+raw average and rmse calculation
+
+```{r eval1, eval=T, echo=T, warning=F, message=F}
+
+```
+
+
+# References
+
+1. MovieLens Latest Datasets. https://grouplens.org/datasets/movielens/latest/
+2. F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens Datasets: History and Context. ACM Transactions on Interactive Intelligent Systems (TiiS) 5, 4: 19:1–19:19. https://doi.org/10.1145/2827872
