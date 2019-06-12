@@ -1,7 +1,7 @@
 ---
-title: "Recommender System Using Baseline Predictor"
+title: "Global Baseline Predictors and RMSE"
 author: "Vikas Sinha"
-date: "June 10 2019"
+date: "June 11 2019"
 output:
   html_document:
     code_folding: show
@@ -19,7 +19,7 @@ output:
 
 # Introduction
 
-The following is an implementation of a Recommender System that recommends movies. This system is meant to demonstrate the usage of baseline predictors that compute biases for each user and item. The data set used is from *grouplens.org*.
+The following is an implementation of the Baseline Predictor for a Recommender System that recommends movies. This system is meant to demonstrate the usage of baseline predictors that compute biases for each user and item. The data set used is from *grouplens.org*.
 
 
 ```{r load, eval=T, echo=T, warning=F, message=F}
@@ -33,6 +33,7 @@ library(ipred)
 library(knitr)
 library(lubridate)
 library(mice)
+library(ModelMetrics)
 library(party)
 library(psych)
 library(rpart)
@@ -46,68 +47,163 @@ library(rrecsys)
 
 # Dataset
 
-GroupLens is a research lab at the University of Minnesota that specializes in recommendation systems. The data used are in the file *ml-latest-small.zip* downloaded from the URL (http://grouplens.org/datasets/movielens/latest).
+The data used are extracted from the file *ml-latest-small.zip* downloaded from (http://grouplens.org/datasets/movielens/latest). GroupLens is a research lab at the University of Minnesota that specializes in recommendation systems and related research areas.
 
-We next examine the summaries of the dataframes corresponding to the movies and their ratings.
+We start by examining summaries and the first few records of the dataframes corresponding to the movies and their ratings.
+
+For the purpose of this assignment we reduce the ratings dataset to about 1000 ratings.
+
 
 ```{r Load, eval=T, echo=T, warning=F, message=F}
 moviefile = "ml-latest-small/movies.csv"
 ratingsfile = "ml-latest-small/ratings.csv"
-
 movies = read.csv(moviefile)
 ratings = read.csv(ratingsfile)
-
 head(movies)
 summary(movies)
 
+
+# Reduce the size of the data set for this assignment.
+
+set.seed(123)
+reduced = sample.int(nrow(ratings), 1000, replace = F)
+ratings = ratings[reduced,]
 head(ratings)
 summary(ratings)
 ```
 
 
-Since the ratings file contains one entry per rating, we can find the number of unique users as follows.
+Since the ratings file contains one entry per rating, we can calculate the number of unique users as follows.
 
 ```{r uniq1, eval=T, echo=T, warning=F, message=F}
-cat("The number of unique users in the data set is:", length(unique(ratings$userId)))
+cat("The number of users in the data set is:", length(unique(ratings$userId)))
 ```
 
 
 # User-Item Matrix
 
-A user-item matrix is created, with each row representing a user and each column representing a movie (item). The element for a given row and column represents the rating given by the user to the movie. The *dcast()* function is used to convert from long to wide format.
+
+A user-item matrix is created, where each row represents a user and each column a movie (item). The element for a given row and column represents the rating given by the user to the movie.
+
+The *dcast()* function from the *data.table* library is used to convert from long to wide format.
+
 
 ```{r da1, eval=T, echo=T, warning=F, message=F}
 ratings2 = dplyr::select(ratings, -timestamp)
 ui = data.table::dcast(ratings2, userId ~ movieId, value.var = "rating")
+
 ui2 = as.matrix(dplyr::select(ui, -userId))
+kable(data.frame(Users=nrow(ui2), Movies=ncol(ui2)),
+      caption="Total Size of User-Item matrix (Sparse)")
+```
+
+
+This table shows the frequency of NAs in the User-Item matrix.
+We can see that the U-I matrix is very sparse, since the count of NA values is much greater than the count of valid values in that matrix.
+
+  
+```{r da2, eval=T, echo=T, warning=F, message=F}
+table(is.na(ui2))
 ```
 
 
 
-## Test/Train data sets
+## Split into test/train subsets.
 
-Split the data set into test and train portions.
+
+Split the data set into test and train subsets. To do this, we perform the following procedure:
+
+
+- Create a Test matrix and set all of its elements to NA.
+- Select a row at random from the *ratings* dataframe. Obtain the userId and movieId.
+- Convert userId, movieId to strings (using as.character())
+- Search for the element in the User-Item Matrix that matches the given userId, movieId, and
+    - set its value to NA for the train matrix
+    - set its value to the actual value for the test matrix
+
 
 ```{r tt1, eval=T, echo=T, warning=F, message=F}
+set.seed(124)
+rows = sample.int(nrow(ratings), size = 0.3*nrow(ratings), replace = F)
+
+r.train = ratings2
+#r.test = ratings2
+r.test = setNames(data.frame(matrix(ncol = 3, nrow = 0)), colnames(ratings2))
+
+
+jj = 1
+for (ii in rows) {
+  
+  #r.test[jj,]$userId = ratings2[ii,]$userId
+  #r.test[jj,]$movieId = ratings2[ii,]$movieId
+  #r.test[jj,]$rating = ratings2[ii,]$rating
+  #jj = jj + 1
+
+  r.test[jj,] = ratings2[ii,]
+  jj = jj + 1
+
+  r.train[ii,]$rating = NA
+}
+
 ```
 
 
-# Raw (mean) rating for each user and item combination. Calculate RMSE for the raw average.
+# Raw ratings.
 
-what is baseline predictor?
-raw average: every entry gets the same prediction, mean over the data set.
+Raw (mean) rating for each user and item combination.
+In a raw average, every entry gets the same prediction, which is the mean over the data set.
 
 ```{r m1, eval=T, echo=T, warning=F, message=F}
+raw.rating = sum(ratings2$rating) / nrow(ratings2)
+
+cat("The raw (global) rating for the data set is:", raw.rating)
+```
+
+
+Calculate RMSE for the raw average.
+
+```{r rmse1, eval=T, echo=T, warning=F, message=F}
+r.test$raw.rating = raw.rating
+
+cat("The raw average RMSE is:", rmse(r.test$raw.rating, r.test$rating))
+```
+
+
+
+# Biases for users and items.
+
+Calculate bias for each user and for each item.
+
+
+```{r eval1, eval=T, echo=T, warning=F, message=F}
+UserBias <- function(uid, df) {
+  ss = df[which(df$userId == uid),]
+  ub = sum(ss$rating)/nrow(ss)
+  return(ub)
+}
+
+ItemBias <- function(mid, df) {
+  ss = df[which(df$movieId == mid),]
+  ib = sum(ss$rating)/nrow(ss)
+  return(ib)
+}
+
 
 ```
 
 
-# Calculate bias for each user and for each item.
+# RMSE for Baseline Predictor
 
-raw average and rmse calculation
+```{r rmse2, eval=T, echo=T, warning=F, message=F}
+r.test$baseline = 0.0
 
-```{r eval1, eval=T, echo=T, warning=F, message=F}
+for (ii in 1:nrow(r.test)) {
+  r.test[ii,]$baseline = r.test[ii,]$raw.rating +
+                           UserBias(r.test[ii,]$userId, ratings2) - raw.rating +
+                           ItemBias(r.test[ii,]$movieId, ratings2) - raw.rating
+}
 
+cat("The RMSE for the baseline predictor is:", rmse(r.test$baseline, r.test$rating))
 ```
 
 
