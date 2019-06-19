@@ -1,0 +1,250 @@
+---
+title: "Recommender System Using Collaborative Filtering"
+author: "Vikas Sinha"
+date: "June 18 2019"
+output:
+  html_document:
+    code_folding: show
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 6
+    toc_float: yes
+  pdf_document: default
+  word_document:
+    toc: yes
+    toc_depth: '6'
+---
+
+
+# Introduction
+
+
+Collaborative filtering is a technique used by recommender systems for predicting the interests of one user based on the preference information of other users [1]. This project is an implementation of a Movie Recommender System that uses the following techniques:
+
+- Item-Item Collaborative Filtering
+- User-User Collaborative Filtering
+
+
+This implementation uses the **recommenderlab** package in R. The **MovieLense** dataset [2] is included with this package and is used here to train, predict and evaluate the models.
+
+The following R libraries are used in this project.
+
+```{r load, eval=T, echo=T, warning=F, message=F}
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(recommenderlab)
+```
+
+
+
+# Data Exploration
+
+The starting point in collaborative filtering is a rating matrix in which rows correspond to users and columns correspond to items [3]. This matrix is implemented in the *MovieLense* data object.
+
+We now load and inspect the *MovieLense* data object.
+
+
+```{r exp1, eval=T, echo=T, warning=F, message=F}
+data(MovieLense)
+MovieLense
+class(MovieLense)
+slotNames(MovieLense)
+class(MovieLense@data)
+```
+
+
+
+We now show names of some of the movies present in the data set.
+
+```{r exp2, eval=T, echo=T, warning=F, message=F}
+head(names(colCounts(MovieLense)))
+```
+
+
+
+The number of ratings corresponding to each rating value is shown in a table below.
+
+```{r exp3, eval=T, echo=T, warning=F, message=F}
+vector_ratings <- as.vector(MovieLense@data)
+kable(table(vector_ratings), caption="Rating frequency")
+```
+
+
+Since a rating with a value of 0 represents the absence of a rating, we remove such ratings from the ratings vector.
+
+
+```{r exp4, eval=T, echo=T, warning=F, message=F}
+# Since a rating of 0 represents absence of a rating in this data set, we can remove such
+# ratings from the ratings vector.
+
+vector_ratings = vector_ratings[vector_ratings != 0]
+hist(vector_ratings, main="Histogram of Ratings", xlab="Rating Value")
+
+```
+
+
+We see above that the rating of 4 (indicating high preference) is the most common rating, and that rating values are skewed to the left.
+
+
+
+# Data Preparation
+
+
+## Minimum Thresholds
+
+For building a collaborative filtering model we can limit the input data based on minimum thresholds: for example, we may ignore
+users that have provided too few ratings, and also ignore those movies that have received too few ratings from users.
+
+Here we restrict the model training to those users who have rated at least 50 movies, and those movies that have been rated by at least 100 users.
+
+```{r dp1, eval=T, echo=T, warning=F, message=F}
+
+ratings = MovieLense[rowCounts(MovieLense) > 50, colCounts(MovieLense) > 100]
+dim(ratings)
+```
+
+
+
+## Normalizing the data.
+
+
+We normalize the data so that the average rating given by each user is 0. This handles cases where a user consistently assigns higher or lower ratings to all movies compared to the average for all users. In other words, normalizing of data is done to remove the bias in each user's ratings.
+
+
+```{r dp2, eval=T, echo=T, warning=F, message=F}
+ratings.n = normalize(ratings)
+ratings.n.vec = as.vector(ratings.n@data)
+ratings.n.vec = ratings.n.vec[ratings.n.vec != 0]
+hist(ratings.n.vec, main="Histogram of Normalized Ratings", xlab="Rating")
+```
+
+
+
+## Splitting data for test and train
+
+
+For splitting data into test and train sets, we can use the *evaluationScheme()* function in recommenderlab. It extends the usage of generic methods of splitting the data, by allowing several parameters that are specific to recommender systems. As shown in the code section below, there is a parameter specifying how many items to use for each user, and another parameter specifying the minimum value that indicates a good rating.
+
+
+```{r tt, eval=T, echo=T, warning=F, message=F}
+percent_train = 0.8
+#min(rowCounts(ratings.n))
+items_to_keep = 15        # items to use for each user
+rating_threshold = 3      # good rating implies >=3
+n_eval = 1                # number of times to run eval
+
+eval_sets = evaluationScheme(data = ratings, method = "split",
+                             train = percent_train, given = items_to_keep,
+                             goodRating = rating_threshold, k = n_eval)
+eval_sets
+```
+
+
+# User-User Collaborative Filtering
+
+In user-based collaborative filtering (UBCF) the procedure is to first find other users that are similar to a given user, then find the top-rated items purchased by those users. Those items are then recommended for the given user [3].
+
+
+We now build a **UBCF** model using the default parameters of the *Recommender()* function, and use it to predict using the test portion of the data set. We use library functions to evaluate accuracy of the prediction by comparing against values in the data set. Performance metrics for the UBCF model are displayed.
+
+
+```{r uu1, eval=T, echo=T, warning=F, message=F}
+eval_recommender = Recommender(data = getData(eval_sets, "train"),
+                               method = "UBCF", parameter = NULL)
+items_to_recommend = 10
+eval_prediction = predict(object = eval_recommender,
+                          newdata = getData(eval_sets, "known"),
+                          n = items_to_recommend,
+                          type = "ratings")
+eval_accuracy = calcPredictionAccuracy(x = eval_prediction,
+                                       data = getData(eval_sets, "unknown"),
+                                       byUser = TRUE)
+head(eval_accuracy)
+```
+
+
+# Item-Item Collaborative Filtering
+
+Item-based collaborative filtering (IBCF) attempts to find, for a given user, items that are similar to items purchased by the user.
+
+The core algorithm is based on these steps [3]:
+
+- For each two items, measure how similar they are in terms of having received
+similar ratings by similar users.
+- For each item, identify the k-most similar items.
+- For each user, identify the items that are most similar to the user's purchases.
+
+We now build an **IBCF** model using the default parameters of the *Recommender()* function.
+
+
+```{r ii1, eval=T, echo=T, warning=F, message=F}
+eval_recommender = Recommender(data = getData(eval_sets, "train"),
+                               method = "IBCF", parameter = NULL)
+items_to_recommend = 10
+eval_prediction = predict(object = eval_recommender,
+                          newdata = getData(eval_sets, "known"),
+                          n = items_to_recommend,
+                          type = "ratings")
+eval_accuracy = calcPredictionAccuracy(x = eval_prediction,
+                                       data = getData(eval_sets, "unknown"),
+                                       byUser = TRUE)
+head(eval_accuracy)
+```
+
+
+We find from the above accuracy tables that RMSE values are significantly lower for the UBCF model.
+
+
+# Evaluating Models using different Similarity Parameters
+
+We now build models using different similarity parameters for computing similarity between users and items. The cosine similarity and the Pearson correlation are commonly used similarity measures and are used here.
+
+
+```{r models1, eval=T, echo=T, warning=F, message=F}
+models_to_evaluate = list(IBCF_cos = list(name = "IBCF", param = list(method = "cosine")),
+                          IBCF_cor = list(name = "IBCF", param = list(method = "pearson")),
+                          UBCF_cos = list(name = "UBCF", param = list(method = "cosine")),
+                          UBCF_cor = list(name = "UBCF", param = list(method = "pearson")),
+                          random = list(name = "RANDOM", param=NULL))
+
+n_recommendations = c(1, 3, 5, 10, 15, 20)
+results = evaluate(x = eval_sets, method = models_to_evaluate, n = n_recommendations)
+```
+
+
+
+# Comparing the Collaborative Filtering Models
+
+
+```{r eval1, eval1=T, echo=T, warning=F, message=F}
+# Draw ROC curve
+plot(results, y = "ROC", annotate = 1, legend="topleft")
+title("ROC Curve")
+
+# Draw precision / recall curve
+plot(results, y = "prec/rec", annotate=1)
+title("Precision-Recall")
+```
+
+
+
+# Conclusions
+
+We see that UBCF's accuracy is higher than that of IBCF. UBCF using Pearson Correlation outperforms all other models. On the other hand, UBCF has greater computational cost and requires more resources. There also exist hybrid systems that integrate both UBCF and IBCF approaches [6]. It is also worth noting that both UBCF and IBCF have limitations -- for example when handling users who have made no purchases or items without a single purchase (the cold-start problem).
+
+
+
+# References
+
+1. https://en.wikipedia.org/wiki/Collaborative_filtering
+2. MovieLens Latest Datasets. https://grouplens.org/datasets/movielens/latest/
+3. Suresh K. Gorakala and Michele Usuelli. Building a Recommendation System with R. 2015 Packt Publishing
+4. F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens Datasets: History and Context. ACM Transactions on Interactive Intelligent Systems (TiiS) 5, 4: 19:1–19:19. https://doi.org/10.1145/2827872
+5. Testing recommender systems in R. https://www.r-bloggers.com/testing-recommender-systems-in-r/
+6. A Personalized Recommender Integrating Item-Based and User-Based Collaborative Filtering. https://ieeexplore.ieee.org/abstract/document/5117479
+7. Beginners Guide to learn about Content Based Recommender Engines. https://www.analyticsvidhya.com/blog/2015/08/beginners-guide-learn-content-based-recommender-systems/
+8. Comparison of User-Based and Item-Based Collaborative Filtering. https://medium.com/@wwwbbb8510/comparison-of-user-based-and-item-based-collaborative-filtering-f58a1c8a3f1d
+
+
