@@ -1,0 +1,233 @@
+---
+title: "Recommender Systems: Accuracy and Beyond"
+author: "Vikas Sinha"
+date: "June 25 2019"
+output:
+  html_document:
+    code_folding: show
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 6
+    toc_float: yes
+  pdf_document: default
+  word_document:
+    toc: yes
+    toc_depth: '6'
+---
+
+
+# Introduction
+
+This project shows the implementation of a system for recommending movies using a user-user collaborative filtering (UBCF) algorithm that has been modified to also include an element of serendipity. The serendipity element is incorporated by
+replacing a fraction of UBCF recommendations by those produced by a Random recommender algorithm. The accuracies of the three
+relevant algorithms, namely the UBCF, the Random and the Combined algorithm which incorporates serendipity are compared. The implementation is based on the *recommenderlab* library in R.
+
+The data set is from Kaggle and may be downloaded from: https://inclass.kaggle.com/c/predict-movie-ratings
+
+The following R libraries are used in this project.
+
+```{r load, eval=T, echo=T, warning=F, message=F}
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(recommenderlab)
+library(reshape2)
+```
+
+
+
+# Data Exploration
+
+
+We now load the ratings data set. Since the data set, containing about 750,000 ratings, is too large for a desktop
+CPU to process in a reasonable time, we use a smaller subset containing 100000 ratings.
+
+
+```{r exp1, eval=T, echo=T, warning=F, message=F}
+set.seed(100)
+train.orig = read.csv("train_v2.csv")
+
+# Select a random subset of 10000 ratings:
+train.orig = train.orig[sample(nrow(train.orig), size=100000, replace=F),]
+```
+
+
+We now explore some of the rating information included in the data set.
+
+
+```{r exp2, eval=T, echo=T, warning=F, message=F}
+train.df2 = dplyr::select(train.orig, user, movie, rating)
+head(train.df2)
+
+# Convert to the object type required by the *recommenderlab* library
+train.df = acast(train.df2, user ~ movie)
+ratings = as(as.matrix(train.df), "realRatingMatrix")
+```
+
+
+
+The number of ratings corresponding to each rating value is shown in a table below.
+
+```{r exp3, eval=T, echo=T, warning=F, message=F}
+vector_ratings <- as.vector(ratings@data)
+t = table(vector_ratings)
+kable(t, caption="Rating frequency")
+```
+
+
+Since a rating with a value of 0 represents the absence of a rating, we remove such ratings from the ratings vector.
+
+
+```{r exp4, eval=T, echo=T, warning=F, message=F}
+# Since a rating of 0 represents absence of a rating in this data set, we can remove such
+# ratings from the ratings vector.
+
+vector_ratings = vector_ratings[vector_ratings != 0]
+hist(vector_ratings, main="Histogram of Ratings", xlab="Rating Value")
+
+```
+
+
+We see above that the rating of 4 (indicating high preference) is the most common rating, and that rating values are skewed to the left.
+
+
+## Splitting data for test and train
+
+
+For splitting data into test and train sets, we use the *evaluationScheme()* function in recommenderlab. It extends the usage of generic methods of splitting the data, by allowing several parameters that are specific to recommender systems. As shown in the code section below, there is a parameter specifying how many items to use for each user, and another parameter specifying the minimum value that indicates a good rating.
+
+
+```{r tt, eval=T, echo=T, warning=F, message=F}
+percent_train = 0.8
+items_to_keep = 1         # items to use for each user
+rating_threshold = 3      # good rating implies >=3
+n_eval = 1                # number of times to run eval
+
+eval_sets = evaluationScheme(data = ratings, method = "split",
+                             train = percent_train, given = items_to_keep,
+                             goodRating = rating_threshold, k = n_eval)
+eval_sets
+
+```
+
+
+# User-User Collaborative Filtering
+
+In user-based collaborative filtering (UBCF) the procedure is to first find other users that are similar to a given user, then find the top-rated items purchased by those users. Those items are then recommended for the given user [3].
+
+
+We now build a **UBCF** model using the default parameters of the *Recommender()* function, and use it to predict using the test portion of the data set. We use library functions to evaluate accuracy of the prediction by comparing against values in the data set. Accuracy of the UBCF model is displayed.
+
+
+```{r ubcf11, eval=T, echo=T, warning=F, message=F}
+set.seed(300)
+eval_recommender = Recommender(data = getData(eval_sets, "train"),
+                               method = "UBCF", parameter = list(method = "pearson"))
+items_to_recommend = 10
+recommend.ubcf = predict(object = eval_recommender,
+                         newdata = getData(eval_sets, "known"),
+                         n = items_to_recommend,
+                         type = "ratings")
+accuracy.ubcf = calcPredictionAccuracy(x = recommend.ubcf,
+                                       data = getData(eval_sets, "unknown"),
+                                       byUser = FALSE)
+head(accuracy.ubcf)
+```
+
+
+
+# Random Recommender
+
+We now build a Random Recommender whose results will subsequently be combined with the UBCF recommender, in 
+order to incorporate an element of serendipity bt making a random recommendation.
+
+We now build a Random model using the default parameters of the *Recommender()* function.
+
+
+```{r rand1, eval=T, echo=T, warning=F, message=F}
+set.seed(300)
+eval_recommender = Recommender(data = getData(eval_sets, "train"),
+                               method = "RANDOM")
+items_to_recommend = 10
+recommend.random = predict(object = eval_recommender,
+                           newdata = getData(eval_sets, "known"),
+                           n = items_to_recommend,
+                           type = "ratings")
+accuracy.random = calcPredictionAccuracy(x = recommend.random,
+                                         data = getData(eval_sets, "unknown"),
+                                         byUser = FALSE)
+head(accuracy.random)
+```
+
+
+
+# UBCF with Serendipity
+
+We now build a set of recommendations based on combining the ratings matrices produced by the UBCF
+and Random Recommenders: we replace the last row of each set of 10 ratings produced by the
+UBCF algorithm with the corresponding row from the ratings matrix computed by the Random Recommender.
+
+
+```{r seren1, eval=T, echo=T, warning=F, message=F}
+m1 = as(recommend.ubcf, "matrix")
+m2 = as(recommend.random, "matrix")
+
+# Replace every 10th row in the UBCF Ratings Matrix with a Random Ratings Matrix.
+ii = 1
+while (ii < nrow(m1)) {
+    m1[ii, ] = m2[ii, ]
+    ii = ii + 10
+}
+
+recommend.final = as(m1, "realRatingMatrix")
+
+accuracy.final = calcPredictionAccuracy(x = recommend.final,
+                                        data = getData(eval_sets, "unknown"),
+                                        byUser = FALSE)
+head(accuracy.final)
+```
+
+
+
+# Effect of Adding Serendipity on Accuracy
+
+
+We compare the RMSE for the three models: UBCF, Random and the final model produced by adding Random
+results to the UBCF results.
+
+
+```{r eval1, eval1=T, echo=T, warning=F, message=F}
+modelperf = data.frame(matrix(ncol=2, nrow=3))
+colnames(modelperf) = c("Model", "RMSE")
+
+modelperf[1,] = list("UBCF", accuracy.ubcf[1])
+modelperf[2,] = list("Random", accuracy.random[1])
+modelperf[3,] = list("Final", accuracy.final[1])
+
+ggplot(data=modelperf, aes(x=Model, y=RMSE)) +
+    #geom_bar(stat="identity", position=position_dodge()) +
+    geom_bar(stat="identity", width=0.4) +
+    ggtitle("Model Performance for Movie Recommendation")
+
+```
+
+
+
+# Conclusions and Future Directions
+
+This implementation shows the results of adding an element of serendipity to the output of a UBCF algorithm by
+replacing a fraction of the computed Ratings Matrix by the corresponding Matrix produced by a Random Recommender.
+The RMSE of the final Recommender is expected to lie between the RMSEs of the UBCF and the Random Recommender, and
+we see that that is the case in the bar plot above. Using the *recommenderlab* library simplifies much of the
+computation.
+
+If online evaluation with actual users were available, it would be possible to determine the long-term benefits (or
+disadvantages) of incorporating serendipity. Online feedback could also enable fine tuning the extra selections, for example,
+by finding additional criteria which might make those recommendations useful. It would also be possible to evaluate the level of randomness or serendipity that would be most useful in producing favorable outcomes in the long run.
+
+# References
+
+1. https://en.wikipedia.org/wiki/Collaborative_filtering
+2. Predict Movie Ratings. https://inclass.kaggle.com/c/predict-movie-ratings
+3. Suresh K. Gorakala and Michele Usuelli. Building a Recommendation System with R. 2015 Packt Publishing
