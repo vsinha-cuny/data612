@@ -1,0 +1,194 @@
+---
+title: "Implementing a Recommender System using the Spark Framework"
+author: "Vikas Sinha"
+date: "July 5 2019"
+output:
+  pdf_document: default
+  html_document:
+    code_folding: show
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 6
+    toc_float: yes
+  word_document:
+    toc: yes
+    toc_depth: '6'
+---
+
+
+# Introduction
+
+This project shows the implementation of a system for recommending movies using the Spark distributed cluster-computng framework. The Spark interface is invoked using the *sparklyr* library in R.
+
+For timing comparisons, recommendation systems are implemented using both the standalone R library *recommenderlab* and using *sparklyr*.
+Using *recommenderlab* a user-user collaborative filtering (UBCF) algorithm is implemented. Using *sparklyr*, an Alternating Least Squares algorithm is implemented.
+
+The data set is from Kaggle and may be downloaded from: https://inclass.kaggle.com/c/predict-movie-ratings
+
+The following R libraries are used.
+
+```{r load, eval=T, echo=T, warning=F, message=F}
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(recommenderlab)
+library(reshape2)
+library(sparklyr)
+library(tibble)
+```
+
+
+
+We use a local instance of Spark in this project. After installing the *sparklyr* package and installing Spark with the 
+*spark_install()* command, we connect to a locally running instance of Spark. Multi-node or cloud-based configurations can
+also be used instead.
+
+The steps performed to install *sparklyr* are as follows:
+
+> install.packages("sparklyr")
+
+> spark_install(version="2.2.0")
+
+
+Connect to a local instance of the Spark server.
+
+
+```{r sc1, eval=T, echo=T, warning=F, message=F}
+
+sc = spark_connect(master="local")
+
+
+```
+
+
+# Data Exploration
+
+
+We now load the ratings data set containing about 750,000 ratings.
+
+
+```{r exp1, eval=T, echo=T, warning=F, message=F}
+set.seed(100)
+train.orig = read.csv("train_v2.csv")
+```
+
+
+We now explore some of the rating information included in the data set.
+
+
+```{r exp2, eval=T, echo=T, warning=F, message=F}
+train.df2 = dplyr::select(train.orig, user, movie, rating)
+head(train.df2)
+
+# Convert to the object type required by the *recommenderlab* library
+train.df = acast(train.df2, user ~ movie)
+ratings = as(as.matrix(train.df), "realRatingMatrix")
+```
+
+
+
+The number of ratings corresponding to each rating value is shown in a table below.
+
+```{r exp3, eval=T, echo=T, warning=F, message=F}
+vector_ratings <- as.vector(ratings@data)
+t = table(vector_ratings)
+kable(t, caption="Rating frequency")
+```
+
+
+
+## Splitting data for test and train
+
+
+For splitting data into test and train sets, we use the *evaluationScheme()* function in recommenderlab. It extends the usage of generic methods of splitting the data, by allowing several parameters that are specific to recommender systems. As shown in the code section below, there is a parameter specifying how many items to use for each user, and another parameter specifying the minimum value that indicates a good rating.
+
+
+```{r tt, eval=T, echo=T, warning=F, message=F}
+percent_train = 0.8
+items_to_keep = 2         # items to use for each user
+rating_threshold = 3      # good rating implies >=3
+n_eval = 1                # number of times to run eval
+
+eval_sets = evaluationScheme(data = ratings, method = "split",
+                             train = percent_train, given = items_to_keep,
+                             goodRating = rating_threshold, k = n_eval)
+eval_sets
+
+```
+
+
+# Alternating Least Squares using the Spark ML library
+
+```{r als1, eval=T, echo=T, warning=F, message=F}
+set.seed(123)
+d1 = getData(eval_sets, "train")
+df1 = as(d1, "data.frame")
+df1$user = as.integer(df1$user)
+df1$item = as.integer(df1$item)
+train.df.spark = sdf_copy_to(sc, df1, "train_recom", overwrite = TRUE)
+head(train.df.spark)
+
+d2 = getData(eval_sets, "known")
+df2 = as(d2, "data.frame")
+df2$user = as.integer(df2$user)
+df2$item = as.integer(df2$item)
+test.df.spark = sdf_copy_to(sc, df2, "test_recom", overwrite = TRUE)
+#head(train.df.spark)
+
+spark_start = Sys.time()
+model.als <- ml_als(train.df.spark, max_iter = 5, reg_param = 0.01)
+ml_predict(model.als, test.df.spark)
+
+recoms = ml_recommend(model.als, type = c("item"), n = 1)
+
+spark_end = Sys.time()
+spark_disconnect(sc)
+
+```
+
+
+# User-User Collaborative Filtering
+
+We now build a **UBCF** model using the default parameters of the *Recommender()* function, and use it to predict using the test portion of the data set. We use library functions to evaluate accuracy of the prediction by comparing against values in the data set. Accuracy of the UBCF model is displayed.
+
+
+```{r ubcf11, eval=T, echo=T, warning=F, message=F}
+set.seed(300)
+rl_start = Sys.time()
+eval_recommender = Recommender(data = getData(eval_sets, "train"),
+                               method = "UBCF", parameter = list(method = "pearson"))
+items_to_recommend = 10
+recommend.ubcf = predict(object = eval_recommender,
+                         newdata = getData(eval_sets, "known"),
+                         n = items_to_recommend,
+                         type = "ratings")
+rl_end = Sys.time()
+accuracy.ubcf = calcPredictionAccuracy(x = recommend.ubcf,
+                                       data = getData(eval_sets, "unknown"),
+                                       byUser = FALSE)
+```
+
+
+# Timing Comparison
+
+```{r tc1, eval=T, echo=T, warning=F, message=F}
+t = spark_end - spark_start
+cat("Spark: ", t)
+
+t = rl_end - rl_start
+cat("Recommenderlab: ", t)
+```
+
+We see from above that the Spark algorithm for ALS took 4s, while the recommenderlab algorithm for UBCF took 16s. While this comparison ignores the differences arising from the algorithms themselves, it can form the basis of an initial estimate for the timing expected from a distributed framework. Since this uses a local, single-node configuration of Spark, the real gains due to parallel processing across hundreds of servers in a cluster are not demonstrated here and make Spark the faster option by far.
+
+
+# When to Use Spark
+
+Spark is a popular distributed cluster-computing framework. Other examples are MapReduce and Apache Flink. Distributed computing frameworks are designed to deal with large datasets and computationally demanding tasks. Although it is possible to have tasks that are computationally expensive but have datasets that are not large, or conversely to have large datasets associated with tasks that are computationally less demanding, in most cases these properties coexist.
+
+When the runtime dataset for a problem is too big to fit in the RAM of a typical server or desktop, then a distributed computing framework such as Spark makes sense. If the problem requires computation that would take too long on a single server, then one can initially consider accelerators such as GPUs. If GPUs on a single server are still not adequate to train or fit the model within an acceptable amount of time, then a distributed framework is again required out of necessity.
+
+The Big Data movement and its related techniques grew from the realization that for an entire class of emerging problems, the requirements of accessing massive data sets and orchestrating distributed processing in parallel were easier to solve with a distributed framework that was reusable across those tasks. Distributed frameworks, data storage and processing systems such as MapReduce and Hadoop owe their origins to this realization. This rationale remains the driving force for modern systems like Spark and Flink.
+
+Obviously, the use of these systems brings additional cost in terms of software complexity; the standalone version of the implemention must be modified to conform to the framework's API, and the necessary software and systems must be installed and configured. As a rule of thumb, if my data set can fit on a single computer and produce training results in a reasonable time, then the additional complexity of Spark is not worth the cost. If not, then a distributed framework must be used, whether on the cloud or in a corporate data center, or some other embodiment. In many cases, the prediction part of the Machine Learning process does not need the massive resources of the cluster.
