@@ -1,0 +1,256 @@
+---
+title: "Recommender System For Hotel Recommendations"
+author: "Vikas Sinha"
+date: "July 14 2019"
+output:
+  pdf_document: default
+  html_document:
+    code_folding: hide
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 6
+    toc_float: yes
+  word_document:
+    toc: yes
+    toc_depth: '6'
+---
+
+
+# Introduction
+
+This is an implementation of a system for recommending hotel reservations.
+The problem description and data are based on a Kaggle competition defined by Expedia.
+
+The problem description is available on Kaggle [1] and the data set may be downloaded from:
+https://www.kaggle.com/c/expedia-hotel-recommendations/data
+
+
+# Recommendation Pipeline
+
+The pipeline for the recommendation system implemented here has two main components:
+
+- In the first step, a classifier is built to predict the cluster ID of the hotel
+cluster that is preferred by a user, based on the input features in the train set. The
+classifier used here is a Gradient Boosting Machine.
+
+- Given the features in the test data set, a prediction is made using the
+  GBM classifier of Step 1. The hotel cluster predicted is then input
+  to an item similarity algorithm in order to predict a set of similar clusters that
+  the user would be interested in. This set of similar items is the output
+  of the recommender system.
+
+For cluster prediction in Step 1 we use a Gradient Boosting Machine from the library
+*gbm*.
+The response variable here is the *hotel_cluster* field in the train data set.
+
+For item similarity computation we use the *lsa* library in R to calculate
+cosine similarity based on the array of latent features provided in the data set.
+
+
+# Libraries
+
+The following R libraries are used.
+
+```{r load, eval=T, echo=T, warning=F, message=F}
+library(class)
+library(cluster)
+library(dplyr)
+library(gbm)
+library(ggplot2)
+library(knitr)
+library(lsa)
+library(reshape2)
+library(tibble)
+
+(.packages())
+```
+
+
+
+# Data Exploration
+
+
+We load the CSV files train.csv and destinations.csv.
+To enable processing on a single node, we limit the number of
+rows to 1000000. Since we are only interested in those observations
+that led to a sale (reservation) and not in those that were mere clicks,
+we filter out observations that did not result in a booking.
+
+
+```{r load1, eval=T, echo=T, warning=F, message=F}
+tdf = read.csv("expedia/train.csv", nrow=1000000)
+tdf = na.omit(tdf) %>% dplyr::filter(is_booking == 1)
+
+latent_features_df = read.csv("expedia/destinations.csv")
+tdf$site_name = as.factor(tdf$site_name)
+
+set.seed(202)
+train_index = sample.int(nrow(tdf), size = floor(0.75*nrow(tdf)), replace=F)
+train = tdf[train_index,]
+test = tdf[-train_index,]
+
+head(tdf)
+```
+
+These are the dimensions of the dataframe containing latent features
+of destinations.
+
+```{r lfd, eval=T, echo=T, warning=F, message=F}
+dim(latent_features_df)
+```
+
+We now explore some of the information included in the training data set.
+These are the features present in the data set with their text descriptions provided by
+Expedia.
+
+
+```{r exp1, eval=T, echo=T, warning=F, message=F}
+description = c(
+    "Timestamp",
+    "ID of the Expedia point of sale (i.e. Expedia.com, Expedia.co.uk, ...)",
+    "ID of continent associated with site_name",
+    "The ID of the country the customer is located",
+    "The ID of the region the customer is located",
+    "The ID of the city the customer is located",
+    "Physical distance between a hotel and acustomer at the time of search",
+    "ID of user",
+    "1 when a user connected from a mobile device",
+    "1 if the click/booking was generated as a part of a package",
+    "ID of a marketing channel",
+    "Checkin date   string",
+    "Checkout date  string",
+    "The number of adults specified in the hotel room",
+    "The number of (extra occupancy) children specified",
+    "The number of hotel rooms specified in the search",
+    "ID of the destination where the hotel search was performed",
+    "Type of destination",
+    "1 if a booking, 0 if a click",
+    "Numer of similar events in the context of the same user session",
+    "Hotel continent",
+    "Hotel country",
+    "Hotel market",
+    "ID of a hotel cluster")
+
+desc = data.frame(Feature=names(train), Description=description)
+kable(desc)
+```
+
+We can see that the following features are present in the train data but not in the
+test data:
+
+- "is_booking"
+- "cnt"
+- "hotel_cluster"
+
+Also, the test data has the field *id* which is not present in the train data
+and seems to be just an index field that can be removed.
+
+The file *destinations.csv* contains latent features.
+
+Data fields *destinations.csv*
+d1-d149     latent description of search regions
+
+# Predictive Model for Hotel Selection
+
+We now build a Gradient Boosting Machine model to predict hotel clusters based on a selection of input features
+provided in the data files. For this, only those entries that have the field *is_booking* set to 1 are used, in
+order to allow the trained model to predict destinations when the user would be likely to make a purchase.
+
+
+```{r sp1, eval=T, echo=T, warning=F, message=F}
+set.seed(234)
+gbm.train = train
+gbm.train = dplyr::select(gbm.train, hotel_cluster,
+                          site_name, user_location_country,
+                          user_location_region, user_location_city,
+                          orig_destination_distance,
+                          hotel_country,
+                          hotel_market,
+                          srch_destination_id,
+                          srch_children_cnt,
+                          channel,
+                          srch_rm_cnt)
+
+m.gbm = gbm(hotel_cluster ~ .,
+            distribution = "gaussian",
+            data = gbm.train)
+print(m.gbm)
+
+gbm.test = dplyr::select(test, -hotel_cluster)
+ypred = predict(m.gbm, n.trees=m.gbm$n.trees, test)
+```
+
+This is the RMSE of the prediction of hotel clusters, as computed
+against the test portion of the data set.
+
+```{r err1, eval=T, echo=T, warning=F, message=F}
+caret::RMSE(ypred, as.integer(test$hotel_cluster))
+```
+
+
+In this section we compute similarity of hotel clusters by
+computing cosine similarity on the provided matrix of latent features.
+The list of similarity values is sorted and the top N values,
+corresponding to the most similar items, are returned. For this
+the *lsa* package's *cosine* function is used.
+
+
+```{r sim1, eval=T, echo=T, warning=F, message=F}
+# Arguments:
+# id: id of the hotel cluster for which similar set is to be computed
+# lfa_df: dataframe of latent features.
+
+get_similar_items <- function(id, lfa_df) {
+    rows = nrow(lfa_df)
+    s = as.numeric(lfa_df[id,])
+    siminfo = numeric(rows)
+    for (ii in 1:rows) {
+        siminfo[ii] = cosine(s, as.numeric(lfa_df[ii,]))
+    }
+
+    # Return the top 10 similar items
+    s = sort(siminfo, decreasing=T)
+    s = head(s, 10)
+    return(s)
+}
+
+```
+
+
+## Computing Similar Items
+
+Here we show an example of how the similarity function based
+on latent features is used to return similar items. The function
+*get_similar_items()* implemented above is invoked to return
+a list of most similar items.
+
+
+```{r sim2, eval=T, echo=T, warning=F, message=F}
+id = as.integer(ypred[1])
+similar = get_similar_items(id, latent_features_df)
+```
+
+
+# Conclusions
+
+This project is an implementation of a recommender system for
+hotel recommendations based on click data related to users' online behavior.
+The response variable is the identifier of the hotel cluster selected by
+the user.
+
+The recommender strategy implemented here is to first predict the response variable
+based using a Gradient Boosting Machine trained on the subset of provided
+data for which users actually made purchases. The GBM model's output is then
+used, in conjunction with provided data on latent features of hotel clusters,
+to compute a set of similar clusters that the user would be interested in.
+
+We used a portion of the training data provided to evaluate the algorithm
+and reported the RMSE achieved.
+
+
+# References
+
+1. Expedia Hotel Recommendations. https://www.kaggle.com/c/expedia-hotel-recommendations/overview
+2. https://towardsdatascience.com/a-machine-learning-approach-building-a-hotel-recommendation-engine-6812bfd53f50
+3. Gradient Boosting Machine. http://uc-r.github.io/gbm_regression
